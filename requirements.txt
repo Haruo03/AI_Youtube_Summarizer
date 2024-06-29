@@ -4,3 +4,5 @@ langchain_community
 qdrant-client
 openai
 tiktoken
+pytube
+youtube-dl
