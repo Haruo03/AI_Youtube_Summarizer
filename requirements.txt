@@ -7,3 +7,4 @@ tiktoken
 pytube
 yt-dlp
 pycryptodome
+youtube_transcript_api
