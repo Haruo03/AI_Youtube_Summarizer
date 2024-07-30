@@ -1,4 +1,3 @@
-from glob import glob
 import streamlit as st
 from langchain.llms import OpenAI
 from langchain.chat_models import ChatOpenAI
@@ -14,17 +13,47 @@ from qdrant_client.models import VectorParams, Distance
 from langchain.vectorstores import Qdrant
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.chains import RetrievalQA
+import hmac
+
+
+st.set_page_config(
+    page_title="Youtube commentaitor",
+    page_icon=""
+)
 
 
 QDRANT_PATH = "./local.qdrant"
 COLLECTION_NAME = "./my_collection"
 
+def check_password():
+    """Returns `True` if the user had the correct password."""
+
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        if hmac.compare_digest(st.session_state["password"], st.secrets["password"]):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Don't store the password.
+        else:
+            st.session_state["password_correct"] = False
+
+    # Return True if the password is validated.
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # Show input for password.
+    st.text_input(
+        "Password", type="password", on_change=password_entered, key="password"
+    )
+    if "password_correct" in st.session_state:
+        st.error("Password incorrect")
+    return False
+
+
+if not check_password():
+    st.stop()  # Do not continue if check_password is not True.
+
 
 def init_page():
-    st.set_page_config(
-        page_title="Youtube Explore",
-        page_icon="📹"
-    )
     st.header("Youtubeコメンテーターくん")
     st.sidebar.title("Nav")
     st.session_state.costs = []
@@ -36,8 +65,7 @@ def select_model():
         st.session_state.model_name = "gpt-3.5-turbo"
     else:
         st.session_state.model_name = "gpt-4"
-    
-    # 300: 本文以外の指示のトークン数 (以下同じ)
+
     st.session_state.max_token = OpenAI.modelname_to_contextsize(st.session_state.model_name) - 300
     return ChatOpenAI(temperature=0, model_name=st.session_state.model_name)
 
@@ -48,11 +76,11 @@ def get_url_input():
 
 
 def get_document(url):
-    with st.spinner("Fetching Content ..."):
+    with st.spinner("動画の内容を確認しています ..."):
         loader = YoutubeLoader.from_youtube_url(
             url,
-            add_video_info=True,  # タイトルや再生数も取得できる
-            language=['en', 'ja']  # 英語→日本語の優先順位で字幕を取得
+            add_video_info=True,
+            language=['en', 'ja']
         )
         text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
             model_name="text-embedding-ada-002",
@@ -65,13 +93,10 @@ def get_document(url):
 def load_qdrant():
     client = QdrantClient(path=QDRANT_PATH)
 
-    # すべてのコレクション名を取得
     collections = client.get_collections().collections
     collection_names = [collection.name for collection in collections]
 
-    # コレクションが存在しなければ作成
     if COLLECTION_NAME not in collection_names:
-        # コレクションが存在しない場合、新しく作成します
         client.create_collection(
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
@@ -80,92 +105,69 @@ def load_qdrant():
 
     return Qdrant(
         client=client,
-        collection_name=COLLECTION_NAME, 
+        collection_name=COLLECTION_NAME,
         embeddings=OpenAIEmbeddings()
     )
 
 
 def build_vector_store(url_docs):
     qdrant = load_qdrant()
-    texts = [doc.page_content for doc in url_docs]  # 文書の内容を抽出
+    texts = [doc.page_content for doc in url_docs]
     qdrant.add_texts(texts)
 
 
 def build_qa_model(llm):
     qdrant = load_qdrant()
     retriever = qdrant.as_retriever(
-        # "mmr",  "similarity_score_threshold" などもある
         search_type="similarity",
-        # 文書を何個取得するか (default: 4)
-        search_kwargs={"k":10}
+        search_kwargs={"k": 10}
     )
     return RetrievalQA.from_chain_type(
         llm=llm,
-        chain_type="stuff", 
+        chain_type="stuff",
         retriever=retriever,
         return_source_documents=True,
         verbose=True
     )
 
 
-def text_upload_and_build_vector_db():
-    url = get_url_input()  #URLを取得する
-    if url:
-        url_docs = get_document(url)
-        if url_docs:
-            with st.spinner("Loading Documents ..."):
-                build_vector_store(url_docs)
-
-
 def ask(qa, query):
     with get_openai_callback() as cb:
-        # query / result / source_documents
         answer = qa(query)
 
     return answer, cb.total_cost
 
 
-def page_ask_my_pdf():
-    st.title("Ask Movie(s)")
-
-    llm = select_model()
-    container = st.container()
-    response_container = st.container()
-
-    with container:
-        query = st.text_input("Query: ", key="input")
-        if not query:
-            answer = None
-        else:
-            qa = build_qa_model(llm)
-            if qa:
-                with st.spinner("ChatGPT is typing ..."):
-                    answer, cost = ask(qa, query)
-                st.session_state.costs.append(cost)
-            else:
-                answer = None
-
-        if answer:
-            with response_container:
-                st.markdown("## Answer")
-                st.write(answer)
-
-
 def main():
     init_page()
 
-    selection = st.sidebar.radio("Go to", ["Movie Upload", "Ask Movie(s)"])
-    if selection == "Movie Upload":
-        text_upload_and_build_vector_db()
-    elif selection == "Ask Movie(s)":
-        page_ask_my_pdf()
+    st.title("気になる動画の内容を質問してみよう！")
+
+    llm = select_model()
+
+    url = get_url_input()
+    if url:
+        url_docs = get_document(url)
+        if url_docs:
+            with st.spinner("ドキュメントを読み込んでいます ..."):
+                build_vector_store(url_docs)
+
+            query = st.text_input("Query: ", key="query")
+            if query:
+                qa = build_qa_model(llm)
+                with st.spinner("解答を作成しています ..."):
+                    answer, cost = ask(qa, query)
+                st.session_state.costs.append(cost)
+
+                if answer:
+                    st.markdown("## Answer")
+                    st.write(answer)
 
     costs = st.session_state.get('costs', [])
     st.sidebar.markdown("## Costs")
     st.sidebar.markdown(f"**Total cost: ${sum(costs):.5f}**")
     for cost in costs:
         st.sidebar.markdown(f"- ${cost:.5f}")
-
 
 
 if __name__ == '__main__':
